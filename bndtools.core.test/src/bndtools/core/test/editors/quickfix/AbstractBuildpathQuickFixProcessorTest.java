@@ -1,6 +1,5 @@
 package bndtools.core.test.editors.quickfix;
 
-import static bndtools.core.test.utils.TaskUtils.log;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.eclipse.jdt.core.compiler.IProblem.CannotThrowType;
 import static org.eclipse.jdt.core.compiler.IProblem.DiscouragedReference;
@@ -19,13 +18,8 @@ import static org.eclipse.jdt.core.compiler.IProblem.UndefinedType;
 import static org.eclipse.jdt.core.compiler.IProblem.UnhandledException;
 import static org.eclipse.jdt.core.compiler.IProblem.UnresolvedVariable;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -48,8 +42,6 @@ import org.eclipse.jdt.core.IPackageFragment;
 import org.eclipse.jdt.core.IPackageFragmentRoot;
 import org.eclipse.jdt.core.JavaCore;
 import org.eclipse.jdt.core.compiler.IProblem;
-import org.eclipse.jdt.core.dom.AST;
-import org.eclipse.jdt.core.dom.ASTParser;
 import org.eclipse.jdt.core.dom.CompilationUnit;
 import org.eclipse.jdt.internal.compiler.problem.DefaultProblem;
 import org.eclipse.jdt.internal.ui.text.correction.AssistContext;
@@ -65,13 +57,8 @@ import org.osgi.framework.BundleContext;
 import org.osgi.framework.FrameworkUtil;
 
 import aQute.bnd.build.Project;
-import aQute.bnd.build.model.BndEditModel;
-import aQute.bnd.build.model.clauses.VersionedClause;
-import aQute.bnd.deployer.repository.LocalIndexedRepo;
 import aQute.bnd.exceptions.Exceptions;
-import aQute.bnd.osgi.Constants;
 import aQute.bnd.unmodifiable.Sets;
-import aQute.lib.io.IO;
 import bndtools.central.Central;
 import bndtools.core.test.utils.LoggingProgressMonitor;
 import bndtools.core.test.utils.TaskUtils;
@@ -114,38 +101,7 @@ abstract class AbstractBuildpathQuickFixProcessorTest {
 
 	@BeforeAll
 	static void beforeAllBase() throws Exception {
-		// Get a handle on the repo. I have seen this come back null on occasion
-		// but not exactly sure why and spinning doesn't seem to fix it; ref
-		// #4253
-		final LocalIndexedRepo localRepo = (LocalIndexedRepo) Central.getWorkspace()
-			.getRepository("Local Index");
-
-		if (localRepo == null) {
-			log("Central.getWorkspace(): " + Central.getWorkspace()
-				.getBase());
-			TaskUtils.dumpWorkspace();
-			throw new IllegalStateException("Could not find Local Index");
-		}
-
-		Path bundleRoot = Paths.get(System.getProperty("bndtools.core.test.dir"))
-			.resolve("./generated/");
-		log("Attempting to import fodder bundles from " + bundleRoot);
-		Files.walk(bundleRoot, 1)
-			.filter(x -> x.getFileName()
-				.toString()
-				.contains(".fodder."))
-			.forEach(bundle -> {
-				try {
-					log("Adding fodder bundle to localRepo: " + bundle);
-					localRepo.put(IO.stream(bundle), null);
-				} catch (Exception e) {
-					throw Exceptions.duck(e);
-				}
-			});
-		TaskUtils.log(() -> ("Local Index contains:\n\t" + localRepo.list("*")
-			.stream()
-			.collect(Collectors.joining(",\n\t"))));
-		TaskUtils.updateWorkspace("beforeAllBase()");
+		TaskUtils.importFodder();
 
 		initSUTClass();
 
@@ -169,7 +125,6 @@ abstract class AbstractBuildpathQuickFixProcessorTest {
 		if (!sourceFolder.exists()) {
 			sourceFolder.create(true, true, new LoggingProgressMonitor("create()ing source folder"));
 		}
-
 		IPackageFragmentRoot root = javaProject.getPackageFragmentRoot(sourceFolder);
 		pack = root.createPackageFragment("test", false,
 			new LoggingProgressMonitor("createPackageFragment() \"test\""));
@@ -188,40 +143,14 @@ abstract class AbstractBuildpathQuickFixProcessorTest {
 	}
 
 	static void clearBuildpath() {
-		log("clearing buildpath");
-		try {
-			BndEditModel model = new BndEditModel(bndProject);
-			model.load();
-			List<VersionedClause> buildPath = model.getBuildPath();
-			if (buildPath != null && !buildPath.isEmpty()) {
-				model.setBuildPath(Collections.emptyList());
-				model.saveChanges();
-				Central.refresh(bndProject);
-				TaskUtils.requestClasspathUpdate("clearBuildpath()");
-				TaskUtils.waitForBuild("clearBuildpath()");
-			} else {
-				log("buildpath was not set; not trying to clear it");
-			}
-		} catch (Exception e) {
-			throw Exceptions.duck(e);
+		if (TaskUtils.clearBuildpath(bndProject)) {
+			TaskUtils.waitForBuild("clearBuildPath()");
 		}
 	}
 
 	static void addBundlesToBuildpath(String... bundleNames) {
-		try {
-			BndEditModel model = new BndEditModel(bndProject);
-			model.load();
-
-			for (String bundleName : bundleNames) {
-				model.addPath(new VersionedClause(bundleName, null), Constants.BUILDPATH);
-			}
-			model.saveChanges();
-			Central.refresh(bndProject);
-			TaskUtils.requestClasspathUpdate("addBundleToBuildpath()");
-			TaskUtils.waitForBuild("addBundleToBuildpath()");
-		} catch (Exception e) {
-			throw Exceptions.duck(e);
-		}
+		TaskUtils.addBundlesToBuildpath(bndProject, bundleNames);
+		TaskUtils.waitForBuild("addBundlesToBuildpath()");
 	}
 
 	// void dumpProblems(Stream<? extends IProblem> problems) {
@@ -310,22 +239,10 @@ abstract class AbstractBuildpathQuickFixProcessorTest {
 			this.source = source;
 
 			// First create our AST
-			ICompilationUnit icu = pack.createCompilationUnit(className + ".java", source, true, null);
-
-			ASTParser parser = ASTParser.newParser(AST.getJLSLatest());
-			Map<String, String> options = JavaCore.getOptions();
-			// Need to set 1.5 or higher for the "import static" syntax to work.
-			// Need to set 1.8 or higher to test parameterized type usages.
-			JavaCore.setComplianceOptions(JavaCore.VERSION_1_8, options);
-			parser.setCompilerOptions(options);
-			parser.setSource(icu);
-			parser.setResolveBindings(true);
-			parser.setBindingsRecovery(true);
-			parser.setKind(ASTParser.K_COMPILATION_UNIT);
-			parser.setUnitName(className + ".java");
-			parser.setEnvironment(new String[] {}, new String[] {}, new String[] {}, true);
-			CompilationUnit cu = (CompilationUnit) parser.createAST(null);
-
+			ICompilationUnit icu = TaskUtils.createCompilationUnit(pack, className, source);
+			// The quick fix processor depends on the presence of binding
+			// information, hence we request the parser to generate it
+			CompilationUnit cu = TaskUtils.buildAST(icu, true);
 			assistContext = new AssistContext(icu, offset, length);
 
 			problems = Arrays.asList(cu.getProblems());

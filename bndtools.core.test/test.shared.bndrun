@@ -3,6 +3,8 @@
 
 -tester: biz.aQute.tester.junit-platform
 
+-runvm: --add-modules=java.xml
+
 # Any references to local bundles (e.g. version=snapshot) must include a reference to the
 # project building the bundles in the bnd.bnd -dependon instruction to ensure the necessary
 # dependencies have already been built.
@@ -18,6 +20,7 @@
 	bnd.identity;id='com.google.guava',\
 	bnd.identity;id='javax.annotation',\
 	bnd.identity;id='org.apache.ant',\
+	bnd.identity;id='org.bndtools.builder',\
 	bnd.identity;id='org.bndtools.headless.build.manager',\
 	bnd.identity;id='org.bndtools.headless.build.plugin.ant',\
 	bnd.identity;id='org.bndtools.headless.build.plugin.gradle',\
@@ -84,29 +87,29 @@
 # The following directives are useful to have when you are debugging in the IDE
 # or at your console, but are too noisy in a CI environment.
 #
-#-runtrace: true
+-runtrace: true
 #
 # For debugging, uncomment this directive and comment out "-runpath.ci"
-#-runpath.debug: \
-#	ch.qos.logback.classic,\
-#	ch.qos.logback.core,\
-#	org.apache.felix.logback
+-runpath.debug: \
+	ch.qos.logback.classic,\
+	ch.qos.logback.core,\
+	org.apache.felix.logback
 #
 # For debugging, extra trace output by the tester.
-#-runproperties.debug: \
-#    tester.trace=true
-#-runrequires.debug: \
-#	bnd.identity;id='org.apache.felix.gogo.command',\
-#	bnd.identity;id='org.apache.felix.gogo.runtime',\
-#	bnd.identity;id='org.apache.felix.gogo.shell',\
-#	bnd.identity;id='org.eclipse.equinox.console'
+-runproperties.debug: \
+    tester.trace=true
+-runrequires.debug: \
+	bnd.identity;id='org.apache.felix.gogo.command',\
+	bnd.identity;id='org.apache.felix.gogo.runtime',\
+	bnd.identity;id='org.apache.felix.gogo.shell',\
+	bnd.identity;id='org.eclipse.equinox.console'
 
 
 # This directive should be uncommented when you are running in the CI environment
 # so that the test output is not too noisy. For debugging, comment this
 # directive and uncomment -runpath.debug
--runpath.ci: \
-	slf4j.nop
+#-runpath.ci: \
+#	slf4j.nop
 
 -runpath: \
 	slf4j.api
@@ -131,6 +134,8 @@
 -runstartlevel: \
     order=sortbynameversion,\
     begin=-1
+
+-runsystempackages: org.xml.sax.helpers,org.xml.sax
 
 # The service bundles need to be started before you attempt to start
 # the application itself, otherwise some of the necessary services (eg,

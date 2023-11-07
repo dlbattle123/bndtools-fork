@@ -21,8 +21,8 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.bndtools.api.BndtoolsConstants;
-import org.bndtools.api.IStartupParticipant;
 import org.bndtools.api.ModelListener;
+import org.bndtools.api.central.ICentral;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
@@ -38,14 +38,17 @@ import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.core.runtime.OperationCanceledException;
 import org.eclipse.core.runtime.Path;
 import org.eclipse.core.runtime.Status;
+import org.eclipse.e4.ui.workbench.IWorkbench;
 import org.eclipse.jdt.core.IJavaProject;
 import org.eclipse.jdt.core.JavaCore;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.swt.widgets.Display;
-import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
-import org.osgi.framework.FrameworkUtil;
 import org.osgi.framework.ServiceRegistration;
+import org.osgi.service.component.annotations.Activate;
+import org.osgi.service.component.annotations.Component;
+import org.osgi.service.component.annotations.Deactivate;
+import org.osgi.service.component.annotations.Reference;
 import org.osgi.util.function.Consumer;
 import org.osgi.util.promise.Deferred;
 import org.osgi.util.promise.Promise;
@@ -74,7 +77,8 @@ import bndtools.Plugin;
 import bndtools.central.RepositoriesViewRefresher.RefreshModel;
 import bndtools.preferences.BndPreferences;
 
-public class Central implements IStartupParticipant {
+@Component(immediate = true)
+public class Central implements ICentral {
 
 	private static final org.slf4j.Logger						logger						= LoggerFactory
 		.getLogger(Central.class);
@@ -89,78 +93,48 @@ public class Central implements IStartupParticipant {
 	private static final Supplier<EclipseWorkspaceRepository>	eclipseWorkspaceRepository	= Memoize
 		.supplier(EclipseWorkspaceRepository::new);
 
-	private static Auxiliary									auxiliary;
-
 	static final AtomicBoolean									indexValid					= new AtomicBoolean(false);
 
-	private final BundleContext									bundleContext;
 	private final Map<IJavaProject, Project>					javaProjectToModel			= new HashMap<>();
 	private final List<ModelListener>							listeners					= new CopyOnWriteArrayList<>();
 
 	private RepositoryListenerPluginTracker						repoListenerTracker;
-	private final InternalPluginTracker							internalPlugins;
-
-	@SuppressWarnings("unused")
-	private static WorkspaceRepositoryChangeDetector			workspaceRepositoryChangeDetector;
+	private InternalPluginTracker								internalPlugins;
 
 	private static RepositoriesViewRefresher					repositoriesViewRefresher	= new RepositoriesViewRefresher();
-	private static BundleContext								context;
 	private static ServiceRegistration<Workspace>				workspaceService;
+	private static BundleContext								context;
 
-	static {
-		try {
-			context = FrameworkUtil.getBundle(Central.class)
-				.getBundleContext();
-			Bundle bndlib = FrameworkUtil.getBundle(Workspace.class);
-			auxiliary = new Auxiliary(context, bndlib);
-
-		} catch (Exception e) {
-			// ignore
-		}
-	}
-
-	/**
-	 * WARNING: Do not instantiate this class. It must be public to allow
-	 * instantiation by the Eclipse registry, but it is not intended for direct
-	 * creation by clients. Instead call Central.getInstance().
-	 */
-	@Deprecated
-	public Central() {
-		bundleContext = FrameworkUtil.getBundle(Central.class)
-			.getBundleContext();
-		internalPlugins = new InternalPluginTracker(bundleContext);
-
-	}
-
-	@Override
-	public void start() {
+	@Activate
+	public Central(BundleContext bc, @Reference
+	IWorkbench notused) {
+		context = bc;
 		instance = this;
-
-		repoListenerTracker = new RepositoryListenerPluginTracker(bundleContext);
+		repoListenerTracker = new RepositoryListenerPluginTracker(bc);
 		repoListenerTracker.open();
+		internalPlugins = new InternalPluginTracker(bc);
 		internalPlugins.open();
+
+		// Trigger building of the Workspace object and registering it a service
+		promiseFactory().submit(Central::getWorkspace)
+			.onFailure(failure -> logger.error("Exception creating Bnd Workspace", failure));
 	}
 
-	@Override
-	public void stop() {
+	@Deactivate
+	void deactivate() {
 		repoListenerTracker.close();
 		ServiceRegistration<Workspace> service = workspaceService;
 		if (service != null) {
 			service.unregister();
 		}
 		instance = null;
+		context = null;
 
 		Workspace ws = workspace.peek();
 		if (ws != null) {
 			ws.close();
 		}
 
-		if (auxiliary != null)
-			try {
-				auxiliary.close();
-			} catch (Exception e) {
-				throw new RuntimeException(e);
-			}
 		internalPlugins.close();
 	}
 
@@ -168,6 +142,11 @@ public class Central implements IStartupParticipant {
 		return instance;
 	}
 
+	/*
+	 * (non-Javadoc)
+	 * @see bndtools.central.Central#getModel(org.eclipse.jdt.core.IJavaProject)
+	 */
+	@Override
 	public Project getModel(IJavaProject project) {
 		try {
 			Project model = javaProjectToModel.get(project);
@@ -329,7 +308,6 @@ public class Central implements IStartupParticipant {
 			// Initialize projects in synchronized block
 			ws.getBuildOrder();
 
-			workspaceRepositoryChangeDetector = new WorkspaceRepositoryChangeDetector(ws);
 			workspaceService = context.registerService(Workspace.class, ws, null);
 			return ws;
 		} catch (Exception e) {
@@ -406,7 +384,6 @@ public class Central implements IStartupParticipant {
 	private static File getWorkspaceDirectory() throws CoreException {
 		IWorkspaceRoot eclipseWorkspace = ResourcesPlugin.getWorkspace()
 			.getRoot();
-
 		IProject cnfProject = eclipseWorkspace.getProject(Workspace.CNFDIR);
 		if (cnfProject.exists()) {
 			if (!cnfProject.isOpen())
@@ -446,6 +423,11 @@ public class Central implements IStartupParticipant {
 		return true;
 	}
 
+	/*
+	 * (non-Javadoc)
+	 * @see bndtools.central.Central#changed(aQute.bnd.build.Project)
+	 */
+	@Override
 	public void changed(Project model) {
 		model.setChanged();
 		for (ModelListener m : listeners) {
@@ -457,12 +439,24 @@ public class Central implements IStartupParticipant {
 		}
 	}
 
+	/*
+	 * (non-Javadoc)
+	 * @see
+	 * bndtools.central.Central#addModelListener(org.bndtools.api.ModelListener)
+	 */
+	@Override
 	public void addModelListener(ModelListener m) {
 		if (!listeners.contains(m)) {
 			listeners.add(m);
 		}
 	}
 
+	/*
+	 * (non-Javadoc)
+	 * @see bndtools.central.Central#removeModelListener(org.bndtools.api.
+	 * ModelListener)
+	 */
+	@Override
 	public void removeModelListener(ModelListener m) {
 		listeners.remove(m);
 	}
@@ -638,6 +632,11 @@ public class Central implements IStartupParticipant {
 				.refreshLocal(IResource.DEPTH_INFINITE, null);
 	}
 
+	/*
+	 * (non-Javadoc)
+	 * @see bndtools.central.Central#close()
+	 */
+	@Override
 	public void close() {
 		repositoriesViewRefresher.close();
 	}
@@ -700,8 +699,8 @@ public class Central implements IStartupParticipant {
 	 * @throws Exception If the callable throws an exception.
 	 */
 	public static <V> V bndCall(BiFunctionWithException<Callable<V>, BooleanSupplier, V> lockMethod,
-		FunctionWithException<BiConsumer<String, RunnableWithException>, V> callable,
-		IProgressMonitor monitorOrNull) throws Exception {
+		FunctionWithException<BiConsumer<String, RunnableWithException>, V> callable, IProgressMonitor monitorOrNull)
+		throws Exception {
 		IProgressMonitor monitor = monitorOrNull == null ? new NullProgressMonitor() : monitorOrNull;
 		Task task = new Task() {
 			@Override
@@ -728,14 +727,14 @@ public class Central implements IStartupParticipant {
 		try {
 			Callable<V> with = () -> TaskManager.with(task, () -> callable.apply((name, runnable) -> after.add(() -> {
 				monitor.subTask(name);
-					try {
+				try {
 					runnable.run();
 				} catch (Exception e) {
 					if (!(e instanceof OperationCanceledException)) {
 						status.add(new Status(IStatus.ERROR, runnable.getClass(),
 							"Unexpected exception in bndCall after action: " + name, e));
-						}
 					}
+				}
 			})));
 			return lockMethod.apply(with, monitor::isCanceled);
 		} finally {
